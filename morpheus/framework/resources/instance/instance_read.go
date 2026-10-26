@@ -1797,18 +1797,17 @@ func convertAPIVolumesToStateVolumes(
 	return volumes, d
 }
 
-// reconcileTags chooses the tags to store after reading an instance.
+// reconcileTags picks the tags written to state after an instance read.
 //
-// tags is Optional but not Computed, so the state written by Create/Update must
-// match the plan exactly. Two things break that if the API value is stored as-is:
-//   - tags = [] in config: the API returns no tags, which ToSetType maps to null.
-//   - Morpheus does not hand back the tags it was sent (drops them, or a policy
-//     adds its own). Terraform then fails the apply with "Provider produced
-//     inconsistent result after apply" although the instance was created.
-//
-// On a post-apply read the planned tags are kept, with a warning when the API
-// disagrees. On a plain refresh the API value is kept so that real drift shows
-// up in the next plan; only an empty set is preserved as empty rather than null.
+// tags is Optional but not Computed, so the state returned by Create and Update
+// must match the plan exactly, yet Morpheus does not always hold the tags it was
+// sent: tag policies and workflow tasks add their own, or overwrite a value.
+// Storing the API value then fails the apply with "Provider produced
+// inconsistent result after apply" although the instance was created. On a
+// post-apply read (create/update) prefer the configured tags so the final state
+// matches the plan, and warn when the API disagrees. On a plain refresh, leave
+// the API value so a server-side change is detected as drift. A configured empty
+// set stays empty in both cases, as ToSetType maps an empty response to null.
 func reconcileTags(
 	id int64,
 	planTags types.Set,
@@ -1830,11 +1829,11 @@ func reconcileTags(
 	}
 
 	diags.AddWarning(
-		"instance tags differ from configuration",
+		"Instance tags differ from configuration",
 		fmt.Sprintf(
-			"Morpheus returned tags [%s] for instance %d, but [%s] were configured. "+
-				"The configured tags have been saved to state; the next refresh will "+
-				"read the tags Morpheus actually holds.",
+			"Morpheus reported tags [%s] for instance %d after the write, but [%s] "+
+				"were configured. The configured tags have been kept in state; the "+
+				"next refresh will read the tags Morpheus reports.",
 			tagsString(apiTags),
 			id,
 			tagsString(planTags),
@@ -1844,7 +1843,7 @@ func reconcileTags(
 	return planTags, diags
 }
 
-// tagsString renders a tags set as a sorted "name=value, ..." list for messages.
+// tagsString renders tags as a sorted "name=value, ..." list for diagnostics.
 func tagsString(tags types.Set) string {
 	parts := make([]string, 0, len(tags.Elements()))
 	for _, e := range tags.Elements() {
