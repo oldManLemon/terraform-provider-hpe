@@ -435,7 +435,8 @@ func getInstanceAsState(
 		},
 	)
 	diags.Append(d...)
-	state.Tags = tags
+	state.Tags, d = reconcileTags(id, plan.Tags, tags, refresh)
+	diags.Append(d...)
 
 	// task_set_id
 	// task_set_id is not included in the API response, it is a write only value
@@ -1794,6 +1795,66 @@ func convertAPIVolumesToStateVolumes(
 	)
 
 	return volumes, d
+}
+
+// reconcileTags chooses the tags to store after reading an instance.
+//
+// tags is Optional but not Computed, so the state written by Create/Update must
+// match the plan exactly. Two things break that if the API value is stored as-is:
+//   - tags = [] in config: the API returns no tags, which ToSetType maps to null.
+//   - Morpheus does not hand back the tags it was sent (drops them, or a policy
+//     adds its own). Terraform then fails the apply with "Provider produced
+//     inconsistent result after apply" although the instance was created.
+//
+// On a post-apply read the planned tags are kept, with a warning when the API
+// disagrees. On a plain refresh the API value is kept so that real drift shows
+// up in the next plan; only an empty set is preserved as empty rather than null.
+func reconcileTags(
+	id int64,
+	planTags types.Set,
+	apiTags types.Set,
+	refresh bool,
+) (types.Set, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	if planTags.IsNull() || planTags.IsUnknown() {
+		return apiTags, diags
+	}
+
+	if len(planTags.Elements()) == 0 && len(apiTags.Elements()) == 0 {
+		return planTags, diags
+	}
+
+	if refresh || planTags.Equal(apiTags) {
+		return apiTags, diags
+	}
+
+	diags.AddWarning(
+		"instance tags differ from configuration",
+		fmt.Sprintf(
+			"Morpheus returned tags [%s] for instance %d, but [%s] were configured. "+
+				"The configured tags have been saved to state; the next refresh will "+
+				"read the tags Morpheus actually holds.",
+			tagsString(apiTags),
+			id,
+			tagsString(planTags),
+		),
+	)
+
+	return planTags, diags
+}
+
+// tagsString renders a tags set as a sorted "name=value, ..." list for messages.
+func tagsString(tags types.Set) string {
+	parts := make([]string, 0, len(tags.Elements()))
+	for _, e := range tags.Elements() {
+		if t, ok := e.(TagsValue); ok {
+			parts = append(parts, t.Name.ValueString()+"="+t.Value.ValueString())
+		}
+	}
+	slices.Sort(parts)
+
+	return strings.Join(parts, ", ")
 }
 
 // getConnectionInfo builds the connection_info list from the instance response.
